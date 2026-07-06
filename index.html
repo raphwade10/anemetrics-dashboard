@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+  <title>Anemetrics Risk Dashboard</title>
+
+  <!-- Insight Control / RiskExec Intelligence design system -->
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&family=Hanken+Grotesk:wght@600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+
+  <script id="tailwind-config">
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            "on-primary": "#1000a9",
+            "inverse-surface": "#d4e4fa",
+            "surface-variant": "#273647",
+            "primary": "#c0c1ff",
+            "surface-bright": "#2c3a4c",
+            "primary-fixed-dim": "#c0c1ff",
+            "surface-tint": "#c0c1ff",
+            "secondary-container": "#3f465c",
+            "on-tertiary-container": "#002d40",
+            "on-tertiary-fixed": "#001e2c",
+            "on-error": "#690005",
+            "on-primary-fixed": "#07006c",
+            "on-secondary-fixed-variant": "#3f465c",
+            "on-primary-fixed-variant": "#2f2ebe",
+            "inverse-on-surface": "#233143",
+            "primary-container": "#8083ff",
+            "inverse-primary": "#494bd6",
+            "surface-container-lowest": "#010f1f",
+            "background": "#051424",
+            "on-tertiary-fixed-variant": "#004c69",
+            "on-error-container": "#ffdad6",
+            "secondary-fixed": "#dae2fd",
+            "on-tertiary": "#00354a",
+            "on-secondary": "#283044",
+            "surface-container-high": "#1c2b3c",
+            "tertiary": "#7bd0ff",
+            "tertiary-fixed": "#c4e7ff",
+            "error-container": "#93000a",
+            "surface-container-low": "#0d1c2d",
+            "error": "#ffb4ab",
+            "tertiary-fixed-dim": "#7bd0ff",
+            "on-background": "#d4e4fa",
+            "on-surface-variant": "#c7c4d7",
+            "secondary-fixed-dim": "#bec6e0",
+            "outline-variant": "#464554",
+            "surface-dim": "#051424",
+            "on-primary-container": "#0d0096",
+            "surface": "#051424",
+            "tertiary-container": "#009bd1",
+            "primary-fixed": "#e1e0ff",
+            "surface-container-highest": "#273647",
+            "outline": "#908fa0",
+            "on-secondary-container": "#adb4ce",
+            "secondary": "#bec6e0",
+            "on-surface": "#d4e4fa",
+            "surface-container": "#122131",
+            "on-secondary-fixed": "#131b2e",
+            /* RAG semantic tokens (health-score = high is good) */
+            "rag-green": "#34d399",
+            "rag-green-dim": "rgba(52,211,153,0.15)",
+            "rag-amber": "#fbbf24",
+            "rag-amber-dim": "rgba(251,191,36,0.15)",
+            "rag-red": "#f87171",
+            "rag-red-dim": "rgba(248,113,113,0.15)"
+          },
+          borderRadius: {
+            "DEFAULT": "0.125rem",
+            "lg": "0.25rem",
+            "xl": "0.5rem",
+            "full": "0.75rem"
+          },
+          spacing: {
+            "container-padding": "24px",
+            "stack-lg": "24px",
+            "unit": "4px",
+            "stack-md": "16px",
+            "stack-sm": "8px",
+            "gutter": "16px"
+          },
+          fontFamily: {
+            "body-md": ["Inter"],
+            "headline-md": ["Hanken Grotesk"],
+            "data-mono": ["JetBrains Mono"],
+            "headline-sm": ["Hanken Grotesk"],
+            "display-lg": ["Hanken Grotesk"],
+            "label-caps": ["Inter"],
+            "body-sm": ["Inter"]
+          },
+          fontSize: {
+            "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
+            "headline-md": ["24px", { "lineHeight": "32px", "fontWeight": "600" }],
+            "data-mono": ["13px", { "lineHeight": "16px", "fontWeight": "500" }],
+            "headline-sm": ["18px", { "lineHeight": "24px", "fontWeight": "600" }],
+            "display-lg": ["32px", { "lineHeight": "40px", "letterSpacing": "-0.02em", "fontWeight": "700" }],
+            "label-caps": ["11px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "700" }],
+            "body-sm": ["12px", { "lineHeight": "18px", "fontWeight": "400" }]
+          }
+        }
+      }
+    };
+  </script>
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body class="bg-background text-on-background font-body-md selection:bg-primary-container selection:text-on-primary-container">
+
+  <!-- ===================== Top nav ===================== -->
+  <header class="fixed top-0 w-full z-50 flex justify-between items-center px-container-padding h-16 bg-background border-b border-outline-variant">
+    <div class="flex items-center gap-8">
+      <h1 class="font-headline-md text-headline-md font-bold text-primary">Anemetrics Risk Dashboard</h1>
+      <nav class="hidden md:flex gap-6" id="topNav"></nav>
+    </div>
+
+    <div class="flex items-center gap-4">
+      <!-- Role switch -->
+      <div class="flex items-center gap-2" id="roleSwitch">
+        <span class="text-on-surface-variant font-label-caps text-label-caps uppercase tracking-widest hidden lg:inline">Viewing as</span>
+        <div class="flex bg-surface-container-low rounded-full p-1 border border-outline-variant">
+          <button class="role-btn is-active px-3 py-1 rounded-full text-body-sm font-bold transition-all" data-role="hod">Head of Delivery</button>
+          <button class="role-btn px-3 py-1 rounded-full text-body-sm font-bold transition-all" data-role="pm">Project Manager</button>
+        </div>
+        <select class="pm-picker bg-surface-container-low border border-outline-variant rounded-full px-3 py-1.5 text-body-sm focus:ring-2 focus:ring-primary" id="pmPicker" hidden></select>
+      </div>
+
+      <button class="bg-primary-container text-on-primary-container px-4 py-1.5 rounded-full font-bold text-body-sm flex items-center gap-2 hover:opacity-90 transition-all">
+        <span class="material-symbols-outlined text-[18px]" style="font-variation-settings: 'FILL' 1;">bolt</span>
+        AI Copilot Active
+      </button>
+    </div>
+  </header>
+
+  <!-- ===================== Sidebar ===================== -->
+  <aside class="fixed left-0 top-16 h-[calc(100vh-64px)] w-[240px] flex flex-col py-stack-md bg-surface-container z-40 overflow-hidden">
+    <div class="px-4 mb-4">
+      <div class="flex items-center gap-3 p-2 rounded-lg bg-surface-container-high border border-outline-variant">
+        <div class="w-10 h-10 rounded bg-primary-container flex items-center justify-center">
+          <span class="material-symbols-outlined text-on-primary-container">business_center</span>
+        </div>
+        <div>
+          <p class="font-headline-sm text-headline-sm text-on-surface leading-tight" id="sideTitle">SportCo Programme</p>
+          <p class="text-[10px] text-on-surface-variant font-bold uppercase tracking-widest" id="sideSub">Anemetrics Assessment</p>
+        </div>
+      </div>
+    </div>
+    <nav class="flex-1 px-2 space-y-1 overflow-y-auto" id="sideNav"></nav>
+    <div class="px-2 pt-3 border-t border-outline-variant mt-2">
+      <div class="flex items-center gap-3 px-3 py-2 text-on-surface-variant">
+        <span class="material-symbols-outlined text-[20px]">schedule</span>
+        <span class="font-label-caps text-label-caps" id="genStamp"></span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ===================== Main content ===================== -->
+  <main class="ml-[240px] mt-16 p-container-padding" id="view"></main>
+
+  <!-- Floating tooltip for interactive charts -->
+  <div id="tooltip" class="chart-tooltip" hidden></div>
+
+  <!-- GSAP for staggered motion; guarded in app.js so UI degrades gracefully offline -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

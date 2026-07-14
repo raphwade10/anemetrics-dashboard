@@ -71,10 +71,137 @@ const state = {
   level: "portfolio",
   projectId: null,
   dimKey: null,
+  quarter: P.quarterCount || 8,   // reporting quarter being viewed (1..8)
 };
 
 const $view = document.getElementById("view");
 const tooltip = document.getElementById("tooltip");
+
+/* ============================================================================
+ * QUARTERLY RESOLVER
+ * ----------------------------------------------------------------------------
+ * Raw workstreams (P.projects) carry an 8-quarter score SERIES per dimension.
+ * resolve() snapshots a workstream "as at" state.quarter into the shape the
+ * render layer expects (scores, trends, reasoning, risks, recs, risk lenses,
+ * exec summary), driving the D-8 Interpreter + Recommendation Engine per band.
+ * ==========================================================================*/
+function bandOf5(v) { return Math.max(1, Math.min(5, Math.round(v))); }
+function pickBand(map, band) {
+  if (map == null) return null;
+  if (Array.isArray(map) || typeof map === "string") return map;
+  for (let b = band; b >= 1; b--) if (map[b] != null) return map[b];
+  for (let b = band; b <= 5; b++) if (map[b] != null) return map[b];
+  return null;
+}
+function meanScoreAt(raw, qIdx) {
+  let s = 0;
+  P.dimensions.forEach((d) => { s += raw.series[d.key][qIdx] * 20; });
+  return Math.round(s / P.dimensions.length);
+}
+/* Quarter lens: grounds each dimension's narrative in the quarter's milestone,
+ * so commentary moves quarter to quarter even where the score is flat. The
+ * milestone focus is embedded verbatim to preserve casing (BIM, MEP, HTM...). */
+const QLENS = {
+  strategy:      (f) => "Alignment is judged against this quarter's milestone: " + f + ".",
+  risk:          (f) => "Risks are read against this quarter's work: " + f + ".",
+  decision:      (f) => "Decision-making is tested by this quarter's agenda: " + f + ".",
+  scope:         (f) => "Scope is framed by this quarter's milestone: " + f + ".",
+  comms:         (f) => "Communications carry this quarter's milestone: " + f + ".",
+  planning:      (f) => "Planning is measured against this quarter's milestone: " + f + ".",
+  resourcing:    (f) => "Resourcing is set against this quarter's demands: " + f + ".",
+  collaboration: (f) => "Collaboration is exercised across this quarter's milestone: " + f + ".",
+};
+
+/* Risk lens = programme risk seen through one outcome (budget/timeline/objectives),
+ * derived from the dimensions that most drive it (per the Anemetrics model). */
+const LENS_DRIVERS = {
+  budget:     ["scope", "planning", "resourcing"],
+  timeline:   ["planning", "decision", "risk"],
+  objectives: ["strategy", "scope", "collaboration"],
+};
+function makeLens(dims, keys) {
+  const parts = keys.map((k) => ({ s: dims[k].score, name: P.dimensions.find((d) => d.key === k).name }));
+  const avg = Math.round(parts.reduce((a, b) => a + b.s, 0) / parts.length);
+  const rag = ragOf(avg);
+  const worst = parts.slice().sort((a, b) => a.s - b.s)[0];
+  const note = rag === "green"
+    ? "Low exposure — supported by healthy " + worst.name + "."
+    : ragLabel(rag) + " exposure — driven by weak " + worst.name + " (" + worst.s + ").";
+  return { status: rag, score: avg, note: note, short: ragLabel(rag) };
+}
+function resolve(raw) {
+  const q = state.quarter, idx = q - 1, B = P.bands;
+  const focus = raw.focus[idx];
+  const dims = {};
+  P.dimensions.forEach((d) => {
+    const series = raw.series[d.key];
+    const d8 = series[idx], band = bandOf5(d8);
+    dims[d.key] = {
+      d8: d8,
+      score: Math.round(d8 * 20),
+      trend: series.slice(0, q).map((v) => Math.round(v * 20)),
+      reasoning: "D-8 " + d8 + "/5. " + QLENS[d.key](focus) + " " + pickBand(B.narr[d.key], band),
+      risks: (pickBand(B.risks[d.key], band) || []).slice(),
+      recommendations: (pickBand(B.recs[d.key], band) || []).slice(),
+    };
+  });
+  const overallTrend = [];
+  for (let qq = 0; qq < q; qq++) overallTrend.push(meanScoreAt(raw, qq));
+  const overallScore = overallTrend[overallTrend.length - 1];
+
+  const lenses = {
+    budget:     makeLens(dims, LENS_DRIVERS.budget),
+    timeline:   makeLens(dims, LENS_DRIVERS.timeline),
+    objectives: makeLens(dims, LENS_DRIVERS.objectives),
+  };
+  return {
+    id: raw.id, code: raw.code, name: raw.code + " — " + raw.name,
+    pm: raw.lead, sponsor: raw.sponsor, focus: raw.focus[idx], context: raw.context,
+    dimensions: dims, overallScore: overallScore, overallTrend: overallTrend,
+    budget: lenses.budget, timeline: lenses.timeline, objectives: lenses.objectives,
+    executiveSummary: composeExecSummary(raw, dims, overallTrend, q),
+    overallRecommendations: composeOverallRecs(raw, dims, overallTrend, q),
+  };
+}
+const rawById = (id) => P.projects.find((p) => p.id === id);
+const projectsNow = () => P.projects.map(resolve);
+
+/* Progress/problems vs previous quarter + since Q1, for a score series. */
+function quarterDelta(trend, q) {
+  if (q <= 1) return { prev: 0, start: 0, text: "First reporting quarter (Q1) — baseline." };
+  const prev = trend[q - 1] - trend[q - 2];
+  const start = trend[q - 1] - trend[0];
+  const dir = prev > 0 ? "improved" : prev < 0 ? "slipped" : "held flat";
+  let text = "Since Q" + (q - 1) + " health " + dir + (prev ? " (" + (prev > 0 ? "+" : "") + prev + ")" : "") + ".";
+  if (q > 2 && start !== 0) text += " Across Q1–Q" + q + " the trend is " + (start > 0 ? "+" + start : String(start)) + ".";
+  return { prev: prev, start: start, text: text };
+}
+function composeExecSummary(raw, dims, overallTrend, q) {
+  const overallScore = overallTrend[q - 1];
+  const band = ragLabel(ragOf(overallScore));
+  const sorted = P.dimensions.slice().sort((a, b) => dims[a.key].score - dims[b.key].score);
+  const weak = sorted.slice(0, 2).filter((d) => dims[d.key].score < 75).map((d) => d.name);
+  const strong = sorted[sorted.length - 1].name;
+  const prog = quarterDelta(overallTrend, q).text;
+  const weakClause = weak.length
+    ? " The weakest dimension" + (weak.length > 1 ? "s are " : " is ") + weak.join(" and ") + "."
+    : " All dimensions are healthy.";
+  return raw.context + " As at Q" + q + " (focus: " + raw.focus[q - 1].toLowerCase() +
+    "), overall health is " + overallScore + " (" + band + "), with " + strong + " strongest." +
+    weakClause + " " + prog;
+}
+function composeOverallRecs(raw, dims, overallTrend, q) {
+  const sorted = P.dimensions.slice().sort((a, b) => dims[a.key].score - dims[b.key].score);
+  const recs = [];
+  sorted.slice(0, 3).forEach((d) => {
+    if (dims[d.key].score < 75 && dims[d.key].recommendations[0]) recs.push(dims[d.key].recommendations[0]);
+  });
+  const qd = quarterDelta(overallTrend, q);
+  if (q > 1 && qd.prev < 0) recs.unshift("Investigate the regression since Q" + (q - 1) + " (" + qd.prev + ") before it compounds into the next quarter.");
+  else if (q > 1 && qd.prev > 0) recs.push("Bank the Q" + (q - 1) + "→Q" + q + " gain (+" + qd.prev + ") by documenting what worked so it sticks.");
+  if (!recs.length) recs.push("Sustain current practice — this workstream is the portfolio reference for good delivery.");
+  return recs;
+}
 
 /* ---- tooltip helpers ----------------------------------------------------- */
 function showTip(html, x, y) {
@@ -90,8 +217,9 @@ function hideTip() { tooltip.hidden = true; }
  * ==========================================================================*/
 function lineChart(series, opts) {
   opts = opts || {};
+  if (series.length < 2) series = [series[0] || 0, series[0] || 0]; // Q1: flat 2-pt
   const w = opts.w || 520, h = opts.h || 140, pad = 22;
-  const labels = P.weekLabels;
+  const labels = P.quarterLabels;
   const min = 0, max = 100;
   const xOf = (i) => pad + (i * (w - pad * 2)) / (series.length - 1);
   const yOf = (v) => h - pad - ((v - min) / (max - min)) * (h - pad * 2);
@@ -180,20 +308,25 @@ function trendBars(series, rag) {
     wrap.appendChild(el("div", {
       class: "w-3 rounded-t-sm " + (isLast ? ragBg(rag) : "bg-primary/30"),
       style: `height:${Math.max(6, (v / max) * 48)}px`,
-      title: `${P.weekLabels[i]}: ${v}`,
+      title: `${P.quarterLabels[i]}: ${v}`,
     }));
   });
   return wrap;
 }
 
-/* ---- trend delta (first vs last) ---------------------------------------- */
+/* ---- trend delta (Q1 vs latest) ----------------------------------------- */
 function trendDelta(series) {
+  if (series.length < 2) {
+    return el("span", { class: "flex items-center gap-1 text-body-sm font-bold text-on-surface-variant" }, [
+      sym("trending_flat", "text-[16px]"), "Q1 baseline",
+    ]);
+  }
   const d = series[series.length - 1] - series[0];
   const up = d > 0, flat = d === 0;
   const icon = flat ? "trending_flat" : up ? "trending_up" : "trending_down";
   const cls = flat ? "text-on-surface-variant" : up ? "text-rag-green" : "text-rag-red";
   return el("span", { class: "flex items-center gap-1 text-body-sm font-bold " + cls }, [
-    sym(icon, "text-[16px]"), (d > 0 ? "+" : "") + d + " over 8 wks",
+    sym(icon, "text-[16px]"), (d > 0 ? "+" : "") + d + " since Q1",
   ]);
 }
 
@@ -213,17 +346,19 @@ function riskTally(project) {
  * ==========================================================================*/
 function currentProject() {
   const id = state.role === "pm" ? state.pmProjectId : state.projectId;
-  return P.projects.find((p) => p.id === id);
+  const raw = rawById(id);
+  return raw ? resolve(raw) : null;
 }
 
 function renderChrome() {
-  document.getElementById("genStamp").textContent = "Generated " + P.generatedAt;
+  document.getElementById("genStamp").textContent = "AIR generated " + P.generatedAt;
+  renderQuarterNav();
 
   const topNav = document.getElementById("topNav");
   topNav.innerHTML = "";
   const navItems = state.role === "hod"
     ? [{ label: "Portfolio Overview", go: goPortfolio, active: state.level === "portfolio" }]
-    : [{ label: "My Project", go: () => goProject(state.pmProjectId), active: state.level === "project" }];
+    : [{ label: "My Workstream", go: () => goProject(state.pmProjectId), active: state.level === "project" }];
   navItems.forEach((it) => {
     topNav.appendChild(el("a", {
       class: "font-medium transition-colors duration-200 cursor-pointer " +
@@ -235,12 +370,12 @@ function renderChrome() {
   const sideTitle = document.getElementById("sideTitle");
   const sideSub = document.getElementById("sideSub");
   if (state.role === "hod") {
-    sideTitle.textContent = "SportCo Programme";
-    sideSub.textContent = P.projects.length + " Phases · 2-Year Build";
+    sideTitle.textContent = P.name;
+    sideSub.textContent = P.projects.length + " Workstreams · Q" + state.quarter + " of " + P.quarterCount;
   } else {
     const proj = currentProject();
     sideTitle.textContent = proj.code + " · " + proj.name.split("—")[1].trim();
-    sideSub.textContent = "PM · " + proj.pm;
+    sideSub.textContent = "Lead · " + proj.pm;
   }
 
   const sideNav = document.getElementById("sideNav");
@@ -250,7 +385,7 @@ function renderChrome() {
       class: "side-item " + (state.level === "portfolio" ? "is-active" : ""),
       onclick: goPortfolio,
     }, [sym("dashboard", "text-[20px]"), el("span", { class: "font-label-caps text-label-caps" }, "Portfolio Overview")]));
-    P.projects.forEach((p) => {
+    projectsNow().forEach((p) => {
       const active = state.level !== "portfolio" && state.projectId === p.id;
       sideNav.appendChild(el("div", {
         class: "side-item " + (active ? "is-active" : ""),
@@ -279,6 +414,21 @@ function renderChrome() {
         el("span", { class: "text-[10px] font-data-mono " + ragText(ragOf(dim.score)) }, dim.score),
       ]));
     });
+  }
+}
+
+/* ---- quarter selector (global reporting quarter) ------------------------ */
+function renderQuarterNav() {
+  const host = document.getElementById("quarterNav");
+  if (!host) return;
+  host.innerHTML = "";
+  for (let q = 1; q <= P.quarterCount; q++) {
+    const isActive = q === state.quarter;
+    host.appendChild(el("button", {
+      class: "quarter-btn text-body-sm font-bold rounded py-1 transition-all " +
+        (isActive ? "bg-primary text-on-primary" : "bg-surface-container-high text-on-surface-variant hover:text-primary"),
+      onclick: () => { if (state.quarter !== q) { state.quarter = q; render(); } },
+    }, "Q" + q));
   }
 }
 
@@ -332,22 +482,39 @@ function renderPortfolio() {
   const frag = document.createDocumentFragment();
   frag.appendChild(breadcrumb());
 
-  const atRisk = P.projects.filter((p) => ragOf(p.overallScore) !== "green");
-  const worst = P.projects.slice().sort((a, b) => a.overallScore - b.overallScore)[0];
+  const projects = projectsNow();
+  const q = state.quarter;
+  const atRisk = projects.filter((p) => ragOf(p.overallScore) !== "green");
+  const worst = projects.slice().sort((a, b) => a.overallScore - b.overallScore)[0];
+  // Movers since the previous quarter (only meaningful from Q2 onward).
+  let moverHtml = "";
+  if (q > 1) {
+    const prev = state.quarter; // capture
+    const movers = projects.map((p) => ({ p, d: p.overallTrend[q - 1] - p.overallTrend[q - 2] }))
+      .filter((m) => m.d !== 0).sort((a, b) => Math.abs(b.d) - Math.abs(a.d));
+    if (movers.length) {
+      const m = movers[0];
+      const up = m.d > 0;
+      moverHtml = ` Biggest move this quarter: <b>${m.p.name.split("—")[1].trim()}</b> ` +
+        `<span class="${up ? "text-rag-green" : "text-rag-red"} font-bold">${up ? "+" : ""}${m.d}</span> vs Q${q - 1}.`;
+    } else {
+      moverHtml = ` No workstream changed health versus Q${q - 1}.`;
+    }
+  }
   frag.appendChild(copilotBanner(
-    `${atRisk.length} of ${P.projects.length} phases need attention. ` +
+    `<b>Q${q} AIR</b> — ${atRisk.length} of ${projects.length} workstreams need attention. ` +
     `<b>${worst.name.split("—")[1].trim()}</b> is the most exposed at a health score of ` +
-    `<span class="text-rag-red font-bold">${worst.overallScore}</span> — absent risk management and chronic under-planning run through every phase.`
+    `<span class="${ragText(ragOf(worst.overallScore))} font-bold">${worst.overallScore}</span>.${moverHtml}`
   ));
 
-  const avg = Math.round(P.projects.reduce((s, p) => s + p.overallScore, 0) / P.projects.length);
-  const totalRisks = P.projects.reduce((s, p) => s + riskTally(p).total, 0);
-  const highRisks = P.projects.reduce((s, p) => s + riskTally(p).high, 0);
+  const avg = Math.round(projects.reduce((s, p) => s + p.overallScore, 0) / projects.length);
+  const totalRisks = projects.reduce((s, p) => s + riskTally(p).total, 0);
+  const highRisks = projects.reduce((s, p) => s + riskTally(p).high, 0);
   frag.appendChild(el("div", { class: "grid grid-cols-2 lg:grid-cols-4 gap-gutter mb-gutter" }, [
-    kpiCard("Portfolio Health", avg + "", ragText(ragOf(avg)), "monitoring", "Mean score across 8 dimensions"),
-    kpiCard("Programmes at Risk", atRisk.length + "/" + P.projects.length, atRisk.length ? "text-rag-amber" : "text-rag-green", "warning", "Amber or red overall status"),
+    kpiCard("Portfolio Health · Q" + q, avg + "", ragText(ragOf(avg)), "monitoring", "Mean score across 8 workstreams"),
+    kpiCard("Workstreams at Risk", atRisk.length + "/" + projects.length, atRisk.length ? "text-rag-amber" : "text-rag-green", "warning", "Amber or red overall status"),
     kpiCard("Critical Risks", highRisks + "", highRisks ? "text-rag-red" : "text-rag-green", "priority_high", "High-severity risks live now"),
-    kpiCard("Tracked Risks", totalRisks + "", "text-primary", "flag", "Across all programmes & dimensions"),
+    kpiCard("Tracked Risks", totalRisks + "", "text-primary", "flag", "Across all workstreams & dimensions"),
   ]));
 
   const grid = el("div", { class: "grid grid-cols-12 gap-gutter" });
@@ -372,15 +539,15 @@ function kpiCard(label, value, valueCls, icon, sub) {
 function programmesTable() {
   const card = el("div", { class: "glass-card overflow-hidden" });
   card.appendChild(el("div", { class: "px-6 py-4 border-b border-outline-variant flex justify-between items-center" }, [
-    el("h3", { class: "font-headline-sm text-headline-sm text-on-surface" }, "Programmes"),
+    el("h3", { class: "font-headline-sm text-headline-sm text-on-surface" }, "Workstreams · Q" + state.quarter),
     el("span", { class: "text-body-sm text-on-surface-variant" }, "Click a row to drill in"),
   ]));
   const table = el("table", { class: "w-full text-left border-collapse" });
   table.appendChild(el("thead", {}, el("tr", { class: "bg-surface-container-low" },
-    ["Programme", "Owner", "Health", "Budget", "Timeline", "Objectives", "Risks"].map((h) =>
+    ["Workstream", "Lead", "Health", "Budget risk", "Timeline risk", "Outcome risk", "Risks"].map((h) =>
       el("th", { class: "px-4 py-3 font-label-caps text-label-caps text-on-surface-variant uppercase" }, h)))));
   const tbody = el("tbody", { class: "divide-y divide-outline-variant" });
-  P.projects.forEach((p) => {
+  projectsNow().forEach((p) => {
     const rag = ragOf(p.overallScore);
     const t = riskTally(p);
     tbody.appendChild(el("tr", {
@@ -403,9 +570,9 @@ function programmesTable() {
           trendMini(p.overallTrend, rag),
         ]),
       ]),
-      statusPill(p.budget.status),
-      statusPill(p.timeline.status, p.timeline.variance),
-      statusPill(p.objectives.status, p.objectives.delivered + "/" + p.objectives.total),
+      statusPill(p.budget.status, p.budget.short),
+      statusPill(p.timeline.status, p.timeline.short),
+      statusPill(p.objectives.status, p.objectives.short),
       el("td", { class: "px-4 py-4" }, [
         el("div", { class: "flex gap-1 items-center" }, [
           t.high ? riskChip(t.high, "bg-rag-red") : null,
@@ -434,6 +601,7 @@ function statusPill(status, extra) {
   ]);
 }
 function trendMini(series, rag) {
+  if (series.length < 2) series = [series[0] || 0, series[0] || 0]; // Q1 guard
   const NS = "http://www.w3.org/2000/svg";
   const w = 64, h = 20;
   const svg = document.createElementNS(NS, "svg");
@@ -455,16 +623,17 @@ function heatmap() {
     el("h3", { class: "font-headline-sm text-headline-sm text-on-surface" }, "Dimension Heatmap"),
   ]));
   card.appendChild(el("p", { class: "text-body-sm text-on-surface-variant mb-4" },
-    "Health score per programme across all 8 delivery dimensions. Click a cell to open it."));
+    "Health score per workstream across all 8 delivery dimensions, as at Q" + state.quarter + ". Click a cell to open it."));
 
+  const projects = projectsNow();
   const tbl = el("table", { class: "w-full border-separate", style: "border-spacing:3px;" });
   tbl.appendChild(el("tr", {}, [el("th", {})].concat(
-    P.projects.map((p) => el("th", { class: "text-[10px] font-data-mono text-on-surface-variant pb-1", title: p.name }, p.code)))));
+    projects.map((p) => el("th", { class: "text-[10px] font-data-mono text-on-surface-variant pb-1", title: p.name }, p.code)))));
   P.dimensions.forEach((d) => {
     const row = el("tr", {}, [
       el("td", { class: "text-body-sm text-on-surface-variant pr-2 whitespace-nowrap" }, d.name),
     ]);
-    P.projects.forEach((p) => {
+    projects.forEach((p) => {
       const score = p.dimensions[d.key].score;
       row.appendChild(el("td", {}, [
         el("div", {
@@ -495,9 +664,9 @@ function legendSwatch(hex, label) {
 function portfolioRecommendations() {
   const wrap = el("div", {});
   wrap.appendChild(el("h3", { class: "font-headline-sm text-headline-sm text-on-surface px-1 mb-3" },
-    "Portfolio Principal Recommendations"));
+    "Recommendation Engine · Portfolio Actions (Q" + state.quarter + ")"));
   const grid = el("div", { class: "grid grid-cols-1 md:grid-cols-2 gap-3" });
-  const atRisk = P.projects.filter((p) => ragOf(p.overallScore) !== "green")
+  const atRisk = projectsNow().filter((p) => ragOf(p.overallScore) !== "green")
     .sort((a, b) => a.overallScore - b.overallScore);
   atRisk.forEach((p) => {
     p.overallRecommendations.slice(0, 1).forEach((rec) => {
@@ -530,12 +699,14 @@ function renderProject() {
   const frag = document.createDocumentFragment();
   frag.appendChild(breadcrumb());
 
+  const qd = quarterDelta(proj.overallTrend, state.quarter);
   frag.appendChild(copilotBanner(
-    `Copilot summary for <b>${proj.name.split("—")[1].trim()}</b>: overall health ` +
+    `<b>Q${state.quarter}</b> summary for <b>${proj.name.split("—")[1].trim()}</b>: overall health ` +
     `<span class="${ragText(rag)} font-bold">${proj.overallScore}</span> (${ragLabel(rag)}). ` +
+    (state.quarter > 1 ? qd.text + " " : "") +
     (rag === "green"
-      ? "No executive intervention required — maintain trajectory."
-      : "See the highlighted dimensions and overall recommendations below.")
+      ? "No intervention required — sustain the practice driving this."
+      : "See the highlighted dimensions and Recommendation Engine actions below.")
   ));
 
   const grid = el("div", { class: "grid grid-cols-12 gap-gutter" });
@@ -567,7 +738,7 @@ function projectHeader(proj, rag) {
       ]),
       el("div", { class: "h-16 w-[1px] bg-outline-variant" }),
       el("div", { class: "flex-1" }, [
-        el("p", { class: "text-on-surface-variant text-body-sm mb-2 uppercase font-bold tracking-tight" }, "8-Week Trend"),
+        el("p", { class: "text-on-surface-variant text-body-sm mb-2 uppercase font-bold tracking-tight" }, "Quarterly Trend (Q1–Q" + state.quarter + ")"),
         trendBars(proj.overallTrend, rag),
       ]),
     ]),
@@ -593,9 +764,9 @@ function overallCopilotPanel(proj, rag) {
       ]),
       el("h4", { class: "font-headline-md text-headline-md mb-4 leading-tight" }, proj.overallRecommendations[0]),
       el("div", { class: "space-y-3" }, [
-        infoChip("check_circle", "Overall health: " + proj.overallScore + " (" + ragLabel(rag) + ")"),
+        infoChip("check_circle", "Q" + state.quarter + " health: " + proj.overallScore + " (" + ragLabel(rag) + ")"),
         infoChip("flag", riskTally(proj).high + " critical · " + riskTally(proj).med + " medium risks live"),
-        infoChip("timer", "Review cadence: weekly steering"),
+        infoChip("timer", "Cadence: quarterly AIR survey (Delphi)"),
       ]),
     ]),
     el("button", {
@@ -616,47 +787,41 @@ function weakestDim(proj) {
     proj.dimensions[a.key].score - proj.dimensions[b.key].score)[0].key;
 }
 
-/* ---- delivery vitals: budget / timeline / objectives -------------------- */
+/* ---- risk lenses: budget / timeline / outcome --------------------------- */
 function vitals(proj) {
   const wrap = el("div", {});
-  wrap.appendChild(el("h3", { class: "font-headline-sm text-headline-sm text-on-surface px-1 mb-3" }, "Delivery Vitals"));
+  wrap.appendChild(el("h3", { class: "font-headline-sm text-headline-sm text-on-surface px-1 mb-1" }, "Risk Lenses"));
+  wrap.appendChild(el("p", { class: "text-body-sm text-on-surface-variant px-1 mb-3" },
+    "Programme risk seen through each outcome, derived from the dimensions that drive it."));
   const grid = el("div", { class: "grid grid-cols-2 gap-4" });
-
-  const b = proj.budget;
-  const bPct = Math.round((b.spent / b.total) * 100);
-  grid.appendChild(el("div", { class: "glass-card p-4 col-span-1" }, [
-    el("div", { class: "flex justify-between items-start mb-3" }, [
-      el("span", { class: "font-label-caps text-label-caps text-on-surface-variant uppercase" }, "Budget"),
-      el("span", { class: "material-symbols-outlined " + ragText(b.status === "green" ? "green" : b.status === "amber" ? "amber" : "red") }, "payments"),
-    ]),
-    el("p", { class: "text-headline-md font-bold text-on-surface" }, b.unit + b.spent + " / " + b.unit + b.total),
-    progressBar(bPct, b.status),
-    el("p", { class: "text-body-sm text-on-surface-variant mt-2" }, b.note),
-  ]));
-
-  const t = proj.timeline;
-  grid.appendChild(el("div", { class: "glass-card p-4 col-span-1" }, [
-    el("div", { class: "flex justify-between items-start mb-3" }, [
-      el("span", { class: "font-label-caps text-label-caps text-on-surface-variant uppercase" }, "Timeline"),
-      el("span", { class: "material-symbols-outlined " + ragText(t.status === "green" ? "green" : t.status === "amber" ? "amber" : "red") }, "schedule"),
-    ]),
-    el("p", { class: "text-headline-md font-bold text-on-surface" }, t.variance),
-    el("p", { class: "text-body-sm text-on-surface-variant mt-2" }, t.milestone + " · due " + t.due),
-  ]));
+  grid.appendChild(lensTile("Budget risk", proj.budget, "payments"));
+  grid.appendChild(lensTile("Timeline risk", proj.timeline, "schedule"));
 
   const o = proj.objectives;
   grid.appendChild(el("div", { class: "glass-card p-5 col-span-2 flex items-center gap-6" }, [
     el("div", {
-      class: "w-16 h-16 rounded-full border-4 flex items-center justify-center font-bold text-headline-sm font-data-mono " +
+      class: "w-16 h-16 rounded-full border-4 flex items-center justify-center font-bold text-headline-md font-data-mono " +
         (o.status === "green" ? "border-rag-green text-rag-green" : o.status === "amber" ? "border-rag-amber text-rag-amber" : "border-rag-red text-rag-red"),
-    }, o.delivered + "/" + o.total),
+    }, o.score + ""),
     el("div", {}, [
-      el("p", { class: "font-bold text-on-surface" }, "Committed Objectives"),
+      el("p", { class: "font-bold text-on-surface" }, "Outcome / Objectives risk"),
       el("p", { class: "text-body-sm text-on-surface-variant mt-1" }, o.note),
     ]),
   ]));
   wrap.appendChild(grid);
   return wrap;
+}
+function lensTile(label, lens, icon) {
+  const rag = lens.status;
+  return el("div", { class: "glass-card p-4 col-span-1" }, [
+    el("div", { class: "flex justify-between items-start mb-3" }, [
+      el("span", { class: "font-label-caps text-label-caps text-on-surface-variant uppercase" }, label),
+      el("span", { class: "material-symbols-outlined " + ragText(rag) }, icon),
+    ]),
+    el("p", { class: "text-headline-md font-bold " + ragText(rag) }, ragLabel(rag)),
+    progressBar(lens.score, rag),
+    el("p", { class: "text-body-sm text-on-surface-variant mt-2" }, lens.note),
+  ]);
 }
 function progressBar(pct, status) {
   const rag = status === "green" ? "green" : status === "amber" ? "amber" : "red";
@@ -667,7 +832,7 @@ function progressBar(pct, status) {
 
 function overallRecoList(proj) {
   const wrap = el("div", {});
-  wrap.appendChild(el("h3", { class: "font-headline-sm text-headline-sm text-on-surface px-1 mb-3" }, "Overall Recommendations"));
+  wrap.appendChild(el("h3", { class: "font-headline-sm text-headline-sm text-on-surface px-1 mb-3" }, "Recommendation Engine · Programme Actions"));
   const list = el("div", { class: "space-y-3" });
   proj.overallRecommendations.forEach((rec, i) => {
     list.appendChild(el("div", { class: "glass-card p-4 flex gap-4 items-start" }, [
@@ -755,7 +920,7 @@ function dimHeader(dimMeta, dim, rag) {
       ]),
       el("div", { class: "h-16 w-[1px] bg-outline-variant" }),
       el("div", { class: "flex-1 min-w-0" }, [
-        el("p", { class: "text-on-surface-variant text-body-sm mb-2 uppercase font-bold tracking-tight" }, "8-Week Trend"),
+        el("p", { class: "text-on-surface-variant text-body-sm mb-2 uppercase font-bold tracking-tight" }, "Quarterly Trend (Q1–Q" + state.quarter + ")"),
         lineChart(dim.trend, { color: RAG_HEX[rag], h: 120 }),
       ]),
     ]),
@@ -784,7 +949,7 @@ function dimCopilotPanel(dimMeta, dim, rag) {
       el("div", { class: "space-y-3" }, [
         infoChip("insights", dimMeta.name + " health: " + dim.score + " (" + ragLabel(rag) + ")"),
         infoChip("flag", (dim.risks || []).length + " specific risk" + ((dim.risks || []).length === 1 ? "" : "s") + " flagged"),
-        infoChip("trending_" + (delta >= 0 ? "up" : "down"), "Trend " + (delta > 0 ? "+" : "") + delta + " over 8 wks"),
+        infoChip("trending_" + (delta >= 0 ? "up" : "down"), dim.trend.length < 2 ? "Q1 baseline" : "Trend " + (delta > 0 ? "+" : "") + delta + " since Q1"),
       ]),
     ]),
     el("div", { class: "absolute -bottom-12 -right-12 opacity-30 pointer-events-none" },
@@ -887,7 +1052,7 @@ function impactTile(label, n, icon, iconCls, sub) {
 
 function dimRecommendations(dim) {
   const wrap = el("div", {});
-  wrap.appendChild(el("h3", { class: "font-headline-sm text-headline-sm text-on-surface px-1 mb-3" }, "Principal Recommendations"));
+  wrap.appendChild(el("h3", { class: "font-headline-sm text-headline-sm text-on-surface px-1 mb-3" }, "Recommendation Engine"));
   const list = el("div", { class: "space-y-3" });
   const icons = ["sync", "visibility", "flag", "task_alt", "bolt"];
   dim.recommendations.forEach((rec, i) => {
@@ -946,7 +1111,7 @@ function setupRoleSwitch() {
 
   picker.innerHTML = "";
   P.projects.forEach((p) => {
-    picker.appendChild(el("option", { value: p.id }, p.pm + " · " + p.code));
+    picker.appendChild(el("option", { value: p.id }, p.code + " · " + p.name));
   });
   picker.value = state.pmProjectId;
 
